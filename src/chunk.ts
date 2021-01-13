@@ -27,7 +27,6 @@ export function readChunk(buffer: Buffer, offset: number): Chunk {
 }
 
 export function writeChunk(name: string, data: number[]): number[] {
-  console.time("write chunk: " + name);
   let length = data.length;
   let bytes = [];
   bytes = [...numberAsFourBytes(length)];
@@ -35,7 +34,6 @@ export function writeChunk(name: string, data: number[]): number[] {
   bytes = [...bytes, ...data];
   let code = crc([...writeAsASCII(name), ...data]);
   bytes = [...bytes, ...numberAsFourBytes(code)];
-  console.timeEnd("write chunk: " + name);
   return bytes;
 }
 

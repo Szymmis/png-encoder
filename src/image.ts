@@ -1,8 +1,9 @@
 import { calcAverage } from "./pixel";
 import { fourBytesToNumber, numberAsFourBytes } from "./io";
-import { Chunk, getChunks, writeChunk, writeChunkBuffer } from "./chunk";
+import { Chunk, getChunks, writeChunk } from "./chunk";
 
 import zlib from "zlib";
+import { writeFileSync } from "fs";
 
 enum FilterType {
   NONE = 0,
@@ -33,36 +34,25 @@ export type ImageOptions = {
   interlace?: number;
 };
 
-// export type Scanline = {
-//   filter: number;
-//   pixels: Pixel[];
-// };
-
 export type RGB = {
   r: number;
   g: number;
   b: number;
-  a: number;
+  a?: number;
 };
 
 export class Image {
   private chunks: Chunk[] = [];
   private options: ImageOptions = { width: 0, height: 0 };
-  // private scanlines: Scanline[] = [];
   private data: Buffer = Buffer.alloc(0);
 
   constructor(data: Buffer) {
     this.load(data);
-
-    // for (let i = 0; i < this.scanlines.length; i++) {
-    //   this.pixelData.push(this.scanlines[i].pixels);
-    // }
   }
 
   private load(data: Buffer): void {
     let chunks = getChunks(data);
     let allData: number[] = [];
-    console.time("load in image");
     for (let i = 0; i < chunks.length; i++) {
       const { name, data } = chunks[i];
       switch (name) {
@@ -80,33 +70,25 @@ export class Image {
         case "IDAT":
           data.forEach((e) => allData.push(e));
           break;
-        // case "IEND":
-        //   break;
+        case "IEND":
+          break;
         default:
           console.log("Unknown chunk", name);
           break;
       }
     }
-    console.timeEnd("load in image");
     console.log(this.options);
 
-    console.time("inflate");
-    // this.readScanlinesAndDecode(
-    //@ts-ignore
     this.data = zlib.inflateSync(Buffer.from(allData));
-    //console.log(this.data);
-    // );
-
     this.decode();
-
-    // for(let i = 0; i < this.pixels.length; i++)
-    //   this.pixels.writeUInt8(0xff, i)
-
-    console.timeEnd("inflate");
   }
 
   getSize() {
     return { width: this.options.width, height: this.options.height };
+  }
+
+  private getIndex(x: number, y: number) {
+    return y * this.getLength() + 1 + x * this.getBytesPerPixel();
   }
 
   private getLength() {
@@ -166,7 +148,7 @@ export class Image {
               this.data[j] += avg.r; // R
               this.data[j + 1] += avg.g; // G
               this.data[j + 2] += avg.b; // B
-              if (bpp >= 4) this.data[j + 3] += avg.a;
+              if (bpp >= 4) this.data[j + 3] += avg.a || 255;
             }
             break;
           case FilterType.PAETH:
@@ -198,7 +180,7 @@ export class Image {
     }
   }
 
-  writeToBuffer() {
+  writeToBuffer(): Buffer {
     let IHDR = writeChunk("IHDR", [
       ...numberAsFourBytes(this.options.width),
       ...numberAsFourBytes(this.options.height),
@@ -208,9 +190,7 @@ export class Image {
       this.options.filterType || 0,
       this.options.interlace || 0,
     ]);
-    console.time("deflate");
     let output = zlib.deflateSync(this.data);
-    console.timeEnd("deflate");
     //@ts-ignore
     let IDAT = writeChunk("IDAT", output);
     let IEND = writeChunk("IEND", []);
@@ -230,81 +210,110 @@ export class Image {
     ]);
   }
 
+  saveToFile(url: string): Image {
+    writeFileSync(url, this.writeToBuffer());
+    return this;
+  }
+
   get(x: number, y: number): RGB {
     const length = this.getLength();
     const bpp = this.getBytesPerPixel();
+    const index = this.getIndex(x, y);
 
     return {
-      r: this.data[length * y + 1 + x * bpp],
-      g: this.data[length * y + 1 + x * bpp + 1],
-      b: this.data[length * y + 1 + x * bpp + 2],
-      a: bpp >= 4 ? this.data[length * y + 1 + x * bpp + 3] : 255,
+      r: this.data[index],
+      g: this.data[index + 1],
+      b: this.data[index + 2],
+      a: bpp >= 4 ? this.data[index + 3] : 255,
     };
   }
 
-  set(x: number, y: number, rgb: RGB): void {
+  set(x: number, y: number, rgb: RGB): Image {
     const length = this.getLength();
     const bpp = this.getBytesPerPixel();
+    const index = this.getIndex(x, y);
 
-    this.data[length * y + 1 + x * bpp] = Math.max(Math.min(rgb.r, 255), 0);
-    this.data[length * y + 1 + x * bpp + 1] = Math.max(Math.min(rgb.g, 255), 0);
-    this.data[length * y + 1 + x * bpp + 2] = Math.max(Math.min(rgb.b, 255), 0);
+    this.data[index] = Math.max(Math.min(rgb.r, 255), 0);
+    this.data[index + 1] = Math.max(Math.min(rgb.g, 255), 0);
+    this.data[index + 2] = Math.max(Math.min(rgb.b, 255), 0);
     if (bpp >= 4)
-      this.data[length * y + 1 + x * bpp + 3] = Math.max(
-        Math.min(rgb.a, 255),
-        0
-      );
+      this.data[index + 3] = Math.max(Math.min(rgb.a || 255, 255), 0);
+
+    return this;
   }
 
-  onEveryPixel(func: (x: number, y: number, rgb: RGB) => void): void {
+  onEveryPixel(func: (x: number, y: number, rgb: RGB) => void): Image {
     for (let i = 0; i < this.options.height; i++) {
       for (let j = 0; j < this.options.width; j++) {
         func(j, i, this.get(j, i));
       }
     }
+
+    return this;
   }
 
-  grayscale() {
+  grayscale(): Image {
     this.onEveryPixel((x, y, rgb) => {
       const avg = (rgb.r + rgb.g + rgb.b) / 3;
       this.set(x, y, { r: avg, g: avg, b: avg, a: rgb.a });
     });
+
+    return this;
   }
 
-  convolute(matrix: number[][]) {
-    // let copy = [...this.pixelData];
-    // let divider = 0;
-    // for (let i = 0; i < matrix.length; i++) {
-    //   for (let j = 0; j < matrix[i].length; j++) divider += matrix[i][j];
-    // }
-    // console.log(divider);
-    // let size = matrix.length;
-    // if (size % 2 == 1) {
-    //   let radius: number = (size - 1) / 2;
-    //   for (let i = radius; i < this.pixelData.length - radius; i++) {
-    //     for (let j = radius; j < this.pixelData[i].length - radius; j++) {
-    //       let sumR = 0;
-    //       let sumG = 0;
-    //       let sumB = 0;
-    //       for (let k = 0; k < size; k++) {
-    //         for (let l = 0; l < size; l++) {
-    //           sumR +=
-    //             matrix[k][l] * this.pixelData[i + k - radius][j + l - radius].r;
-    //           sumG +=
-    //             matrix[k][l] * this.pixelData[i + k - radius][j + l - radius].g;
-    //           sumB +=
-    //             matrix[k][l] * this.pixelData[i + k - radius][j + l - radius].b;
-    //         }
-    //       }
-    //       if (divider != 0) {
-    //         sumR /= divider;
-    //         sumG /= divider;
-    //         sumB /= divider;
-    //       }
-    //       copy[i][j] = new Pixel(sumR, sumG, sumB);
-    //     }
-    //   }
-    //   this.pixelData = copy;
-    // }
+  shade(r: number, g: number, b: number) {
+    this.onEveryPixel((x, y, rgb) => {
+      this.set(x, y, {
+        r: r * (rgb.r / 255),
+        g: g * (rgb.g / 255),
+        b: b * (rgb.b / 255),
+        a: rgb.a,
+      });
+    });
+
+    return this;
+  }
+
+  convolute(matrix: number[][]): Image {
+    let copy = Buffer.alloc(this.data.length);
+    this.data.copy(copy, 0, 0, this.data.length);
+    let divider = 0;
+    for (let i = 0; i < matrix.length; i++) {
+      for (let j = 0; j < matrix[i].length; j++) divider += matrix[i][j];
+    }
+    console.log(divider);
+    let size = matrix.length;
+    if (size % 2 == 1) {
+      let radius: number = (size - 1) / 2;
+      for (let i = radius; i < this.options.height - radius; i++) {
+        for (let j = radius; j < this.options.width - radius; j++) {
+          let sumR = 0;
+          let sumG = 0;
+          let sumB = 0;
+          for (let k = 0; k < size; k++) {
+            for (let l = 0; l < size; l++) {
+              let val = this.get(j + l - radius, i + k - radius);
+              sumR += matrix[k][l] * val.r;
+              sumG += matrix[k][l] * val.g;
+              sumB += matrix[k][l] * val.b;
+            }
+          }
+          if (divider != 0) {
+            sumR /= divider;
+            sumG /= divider;
+            sumB /= divider;
+          }
+
+          let index = this.getIndex(j, i);
+          copy.writeUInt8(sumR, index);
+          copy.writeUInt8(sumG, index + 1);
+          copy.writeUInt8(sumB, index + 2);
+        }
+      }
+
+      this.data = copy;
+    }
+
+    return this;
   }
 }
